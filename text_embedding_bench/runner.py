@@ -31,7 +31,7 @@ class EmbeddingBenchRunner:
         self.qps_test_duration = 30  # QPS test duration in seconds (reduced for adaptive testing)
         self.qps_max_concurrent = 100  # Maximum concurrent level to test
         self.qps_improvement_threshold = 0.05  # 5% improvement threshold for adaptive testing
-        self.qps_test_method = "exhaustive"  # "adaptive" or "exhaustive"
+        self.qps_test_method = "adaptive"  # "adaptive" or "exhaustive"
         self.qps_concurrent_step = 1  # Step size for exhaustive method
         self.connections = connections.connect(uri="http://10.104.13.2:19530")
 
