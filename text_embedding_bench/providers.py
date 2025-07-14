@@ -65,7 +65,7 @@ PROVIDERS_MODELS = {
         {
             "name": "BAAI/bge-base-en-v1.5",
             "dim": 768,
-            "params": {"provider": "TEI", "endpoint": os.getenv("TEI_ENDPOINT")},
+            "params": {"provider": "TEI", "endpoint": "http://10.104.34.115:80"},
         }
     ],
 }

@@ -31,14 +31,16 @@ class EmbeddingBenchRunner:
         self.qps_test_duration = 30  # QPS test duration in seconds (reduced for adaptive testing)
         self.qps_max_concurrent = 100  # Maximum concurrent level to test
         self.qps_improvement_threshold = 0.05  # 5% improvement threshold for adaptive testing
-        self.connections = connections.connect(uri="http://localhost:19530")
+        self.qps_test_method = "exhaustive"  # "adaptive" or "exhaustive"
+        self.qps_concurrent_step = 1  # Step size for exhaustive method
+        self.connections = connections.connect(uri="http://10.104.13.2:19530")
 
     def run(self):
         """Run benchmark for all providers and models."""
         providers_models = PROVIDERS_MODELS.copy()
 
         token_variations = [
-            {"name": "256_tokens", "text": generate_fake_text(256), "tokens": 256},
+            # {"name": "256_tokens", "text": generate_fake_text(256), "tokens": 256},
             {"name": "512_tokens", "text": generate_fake_text(512), "tokens": 512},
             # {"name": "1024_tokens", "text": generate_fake_text(1024), "tokens": 1024},
             # {"name": "2048_tokens", "text": generate_fake_text(2048), "tokens": 2048},
@@ -265,8 +267,8 @@ class EmbeddingBenchRunner:
             collection.flush()
             collection.load()
             
-            # Test QPS for different token lengths - use a subset for efficiency
-            qps_token_variations = [token_variations[0], token_variations[2], token_variations[4]]  # 256, 1024, 4096 tokens
+            # Test QPS for different token lengths - use available variations
+            qps_token_variations = token_variations  # Use all available token variations
             
             for token_var in qps_token_variations:
                 token_count = token_var["tokens"]
@@ -295,11 +297,17 @@ class EmbeddingBenchRunner:
             })
 
     def _run_insert_qps_test(self, collection, provider, model_name, token_count, token_name, test_text):
-        """Run INSERT QPS test with adaptive concurrency level finding."""
-        max_qps, optimal_concurrent = self._find_optimal_qps(
-            lambda concurrent: self._execute_insert_qps_test(collection, test_text, concurrent),
-            "INSERT", provider, model_name, token_name
-        )
+        """Run INSERT QPS test with adaptive or exhaustive concurrency level finding."""
+        if self.qps_test_method == "exhaustive":
+            max_qps, optimal_concurrent = self._find_optimal_qps_exhaustive(
+                lambda concurrent: self._execute_insert_qps_test(collection, test_text, concurrent),
+                "INSERT", provider, model_name, token_name
+            )
+        else:
+            max_qps, optimal_concurrent = self._find_optimal_qps(
+                lambda concurrent: self._execute_insert_qps_test(collection, test_text, concurrent),
+                "INSERT", provider, model_name, token_name
+            )
         
         # Record the optimal result
         if max_qps is not None:
@@ -362,11 +370,17 @@ class EmbeddingBenchRunner:
         return qps, successful_requests, failed_requests, actual_duration
 
     def _run_search_qps_test(self, collection, provider, model_name, token_count, token_name, test_text):
-        """Run SEARCH QPS test with adaptive concurrency level finding."""
-        max_qps, optimal_concurrent = self._find_optimal_qps(
-            lambda concurrent: self._execute_search_qps_test(collection, test_text, concurrent),
-            "SEARCH", provider, model_name, token_name
-        )
+        """Run SEARCH QPS test with adaptive or exhaustive concurrency level finding."""
+        if self.qps_test_method == "exhaustive":
+            max_qps, optimal_concurrent = self._find_optimal_qps_exhaustive(
+                lambda concurrent: self._execute_search_qps_test(collection, test_text, concurrent),
+                "SEARCH", provider, model_name, token_name
+            )
+        else:
+            max_qps, optimal_concurrent = self._find_optimal_qps(
+                lambda concurrent: self._execute_search_qps_test(collection, test_text, concurrent),
+                "SEARCH", provider, model_name, token_name
+            )
         
         # Record the optimal result
         if max_qps is not None:
@@ -537,6 +551,69 @@ class EmbeddingBenchRunner:
         
         logger.info(f"Final optimal QPS: {final_qps:.2f} at concurrent_level={final_concurrent}")
         return final_qps, final_concurrent
+
+    def _find_optimal_qps_exhaustive(self, test_function, operation_type, provider, model_name, token_name):
+        """Find optimal QPS by testing all concurrent levels incrementally."""
+        logger.info(f"Finding optimal QPS using exhaustive method for {operation_type} {provider} - {model_name} - {token_name}")
+        
+        best_qps = 0
+        best_concurrent = 1
+        all_results = []
+        consecutive_failures = 0
+        
+        # Test all concurrent levels from 1 to max
+        current_concurrent = 1
+        while current_concurrent <= self.qps_max_concurrent:
+            try:
+                logger.info(f"Testing {operation_type} QPS at concurrent_level={current_concurrent}")
+                qps, successful, failed, duration = test_function(current_concurrent)
+                
+                logger.info(f"  Result: {qps:.2f} QPS (successful={successful}, failed={failed})")
+                
+                all_results.append({
+                    'concurrent': current_concurrent,
+                    'qps': qps,
+                    'successful': successful,
+                    'failed': failed
+                })
+                
+                # Update best if this is better
+                if qps > best_qps:
+                    best_qps = qps
+                    best_concurrent = current_concurrent
+                
+                # Reset failure counter on success
+                consecutive_failures = 0
+                
+                # If QPS drops significantly (e.g., 20%) from best, we can optionally stop early
+                if best_qps > 0 and qps < best_qps * 0.8 and current_concurrent > best_concurrent + 10:
+                    logger.info(f"  QPS dropped significantly from best ({best_qps:.2f}), stopping early")
+                    break
+                    
+            except Exception as e:
+                logger.error(f"Error in QPS test at concurrent_level={current_concurrent}: {str(e)}")
+                consecutive_failures += 1
+                
+                # Stop if we have too many consecutive failures
+                if consecutive_failures >= 3:
+                    logger.error("Too many consecutive failures, stopping exhaustive search")
+                    break
+            
+            # Increment by step size
+            current_concurrent += self.qps_concurrent_step
+        
+        if not all_results:
+            logger.error("No successful QPS tests completed")
+            return None, None
+        
+        # Log all results for analysis
+        logger.info("\nExhaustive search complete. All results:")
+        for result in all_results:
+            logger.info(f"  Concurrent={result['concurrent']}: {result['qps']:.2f} QPS")
+        
+        logger.info(f"\nBest QPS: {best_qps:.2f} at concurrent_level={best_concurrent}")
+        
+        return best_qps, best_concurrent
 
     def save_and_report(self):
         """Save results to CSV and print summary tables."""
